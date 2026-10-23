@@ -1,0 +1,18 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  background-color: #f3efe6;
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 31px,
+    rgba(27, 36, 48, 0.045) 32px
+  );
+}
+
+button, input, select, textarea {
+  font: inherit;
+}

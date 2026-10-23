@@ -1,0 +1,3 @@
+order_id,customer,amount,status,channel,placed_at,product
+2101,Neel Joshi,1599,paid,Website,2026-10-22,Silk shirt
+,Missing Name,100,paid,Website,2026-10-22,Bad row
