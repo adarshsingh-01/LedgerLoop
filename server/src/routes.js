@@ -3,7 +3,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import multer from 'multer';
-import { BOOKS } from './books.js';
+import {
+  checkPassword,
+  clearAuthCookie,
+  openStore,
+  publicUser,
+  registerUser,
+  requireStore,
+  requireUser,
+  setAuthCookie,
+  storesFor,
+  workspaceOf,
+} from './auth.js';
 import { importCsv } from './csv.js';
 import { followUpDraft } from './draft.js';
 import { buildLineage } from './match.js';
@@ -17,21 +28,84 @@ const STATUSES = ['open', 'investigating', 'waiting', 'resolved'];
 
 export const api = Router();
 
+function sendError(error, res, next) {
+  if (error.status) return res.status(error.status).json({ error: error.message });
+  return next(error);
+}
+
 api.get('/health', (req, res) => {
-  res.json({ ok: true, books: BOOKS.name });
+  res.json({ ok: true });
 });
+
+api.post('/auth/signup', async (req, res, next) => {
+  try {
+    const user = await registerUser(req.body || {});
+    setAuthCookie(res, user._id);
+    res.status(201).json({ user: publicUser(user), stores: await storesFor(user._id) });
+  } catch (error) {
+    sendError(error, res, next);
+  }
+});
+
+api.post('/auth/login', async (req, res, next) => {
+  try {
+    const user = await checkPassword(req.body?.email, req.body?.password);
+    if (!user) return res.status(401).json({ error: 'Email or password is wrong.' });
+    setAuthCookie(res, user._id);
+    res.json({ user: publicUser(user), stores: await storesFor(user._id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+api.post('/auth/logout', (req, res) => {
+  clearAuthCookie(res);
+  res.json({ ok: true });
+});
+
+api.get('/samples/:name', (req, res) => {
+  if (!['orders', 'payments', 'bank'].includes(req.params.name)) {
+    return res.status(404).json({ error: 'Unknown sample' });
+  }
+  const file = path.join(rootDir, 'samples', `${req.params.name}.csv`);
+  if (!fs.existsSync(file)) return res.status(404).json({ error: 'Sample missing' });
+  return res.download(file);
+});
+
+api.use(requireUser);
+
+api.get('/auth/me', async (req, res, next) => {
+  try {
+    res.json({ user: publicUser(req.user), stores: await storesFor(req.user._id) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+api.post('/stores', async (req, res, next) => {
+  try {
+    await openStore(req.user, req.body || {});
+    res.status(201).json({ stores: await storesFor(req.user._id) });
+  } catch (error) {
+    sendError(error, res, next);
+  }
+});
+
+api.use(requireStore);
 
 api.get('/overview', async (req, res, next) => {
   try {
+    const scope = { storeId: req.store._id };
+    const books = workspaceOf(req.store, req.user);
     const [matches, exceptions, audits, orders] = await Promise.all([
-      Match.find().lean(),
-      Exception.find().lean(),
-      Audit.find().sort({ createdAt: -1 }).limit(6).lean(),
-      Order.countDocuments(),
+      Match.find(scope).lean(),
+      Exception.find(scope).lean(),
+      Audit.find(scope).sort({ createdAt: -1 }).limit(6).lean(),
+      Order.countDocuments(scope),
     ]);
     const open = exceptions.filter((item) => item.status !== 'resolved');
     res.json({
-      books: BOOKS,
+      books,
       counts: {
         orders,
         confirmed: matches.filter((item) => item.status === 'confirmed').length,
@@ -50,8 +124,8 @@ api.get('/overview', async (req, res, next) => {
 
 api.get('/matches', async (req, res, next) => {
   try {
-    const status = req.query.status;
-    const query = status ? { status } : {};
+    const query = { storeId: req.store._id };
+    if (req.query.status) query.status = req.query.status;
     const matches = await Match.find(query).lean();
     const rank = { suggested: 0, confirmed: 1, rejected: 2 };
     matches.sort((a, b) => rank[a.status] - rank[b.status] || b.confidence - a.confidence);
@@ -63,12 +137,13 @@ api.get('/matches', async (req, res, next) => {
 
 api.post('/matches/:id/confirm', async (req, res, next) => {
   try {
-    const match = await Match.findById(req.params.id);
+    const match = await Match.findOne({ _id: req.params.id, storeId: req.store._id });
     if (!match || match.status !== 'suggested') return res.status(404).json({ error: 'Suggestion not found' });
     match.status = 'confirmed';
     await match.save();
     await Audit.create({
-      actor: BOOKS.operator,
+      storeId: req.store._id,
+      actor: req.user.name,
       action: 'Confirmed match',
       detail: match.explanation,
     });
@@ -80,16 +155,17 @@ api.post('/matches/:id/confirm', async (req, res, next) => {
 
 api.post('/matches/:id/reject', async (req, res, next) => {
   try {
-    const match = await Match.findById(req.params.id);
+    const match = await Match.findOne({ _id: req.params.id, storeId: req.store._id });
     if (!match || match.status !== 'suggested') return res.status(404).json({ error: 'Suggestion not found' });
     match.status = 'rejected';
     await match.save();
     await Audit.create({
-      actor: BOOKS.operator,
+      storeId: req.store._id,
+      actor: req.user.name,
       action: 'Rejected match',
       detail: match.explanation,
     });
-    await runReconcile();
+    await runReconcile(req.store._id);
     res.json(match);
   } catch (error) {
     next(error);
@@ -98,8 +174,9 @@ api.post('/matches/:id/reject', async (req, res, next) => {
 
 api.get('/exceptions', async (req, res, next) => {
   try {
-    const items = await Exception.find().sort({ priority: -1 }).lean();
-    res.json(items.map((item) => ({ ...item, draft: followUpDraft(item) })));
+    const books = workspaceOf(req.store, req.user);
+    const items = await Exception.find({ storeId: req.store._id }).sort({ priority: -1 }).lean();
+    res.json(items.map((item) => ({ ...item, draft: followUpDraft(item, books) })));
   } catch (error) {
     next(error);
   }
@@ -107,7 +184,7 @@ api.get('/exceptions', async (req, res, next) => {
 
 api.post('/exceptions/:id', async (req, res, next) => {
   try {
-    const item = await Exception.findById(req.params.id);
+    const item = await Exception.findOne({ _id: req.params.id, storeId: req.store._id });
     if (!item) return res.status(404).json({ error: 'Exception not found' });
     if (req.body.status) {
       if (!STATUSES.includes(req.body.status)) return res.status(400).json({ error: 'Unknown status' });
@@ -117,11 +194,12 @@ api.post('/exceptions/:id', async (req, res, next) => {
     if (req.body.note != null) item.note = String(req.body.note).slice(0, 1000);
     await item.save();
     await Audit.create({
-      actor: BOOKS.operator,
+      storeId: req.store._id,
+      actor: req.user.name,
       action: 'Updated exception',
       detail: `${item.title} Status ${item.status}, owner ${item.owner}.`,
     });
-    res.json({ ...item.toObject(), draft: followUpDraft(item) });
+    res.json({ ...item.toObject(), draft: followUpDraft(item, workspaceOf(req.store, req.user)) });
   } catch (error) {
     next(error);
   }
@@ -129,20 +207,21 @@ api.post('/exceptions/:id', async (req, res, next) => {
 
 api.post('/orders/:orderId/mark-paid', async (req, res, next) => {
   try {
-    const order = await Order.findOne({ orderId: req.params.orderId });
+    const order = await Order.findOne({ orderId: req.params.orderId, storeId: req.store._id });
     if (!order) return res.status(404).json({ error: 'Order not found' });
     order.status = 'paid';
     await order.save();
     await Exception.updateMany(
-      { orderId: order.orderId, kind: 'order_unpaid_despite_payment', status: { $ne: 'resolved' } },
+      { storeId: req.store._id, orderId: order.orderId, kind: 'order_unpaid_despite_payment', status: { $ne: 'resolved' } },
       { status: 'resolved', note: 'Order marked paid after the captured payment was reviewed.' },
     );
     await Audit.create({
-      actor: BOOKS.operator,
+      storeId: req.store._id,
+      actor: req.user.name,
       action: 'Marked order paid',
       detail: `${order.orderId} ${order.customer}`,
     });
-    await runReconcile();
+    await runReconcile(req.store._id);
     res.json(order);
   } catch (error) {
     next(error);
@@ -151,7 +230,7 @@ api.post('/orders/:orderId/mark-paid', async (req, res, next) => {
 
 api.get('/orders', async (req, res, next) => {
   try {
-    const orders = await Order.find().sort({ placedAt: -1 }).lean();
+    const orders = await Order.find({ storeId: req.store._id }).sort({ placedAt: -1 }).lean();
     res.json(orders);
   } catch (error) {
     next(error);
@@ -160,7 +239,7 @@ api.get('/orders', async (req, res, next) => {
 
 api.get('/lineage/:orderId', async (req, res, next) => {
   try {
-    const { orders, payments, bank, matches } = await loadBooks();
+    const { orders, payments, bank, matches } = await loadBooks(req.store._id);
     const order = orders.find((item) => item.orderId === req.params.orderId);
     if (!order) return res.status(404).json({ error: 'Order not found' });
     res.json(buildLineage({ order, payments, bank, matches }));
@@ -171,7 +250,7 @@ api.get('/lineage/:orderId', async (req, res, next) => {
 
 api.get('/leakage', async (req, res, next) => {
   try {
-    const items = await Exception.find().lean();
+    const items = await Exception.find({ storeId: req.store._id }).lean();
     const fees = items.filter((item) => item.kind === 'fee_above_contract');
     const unpaid = items.filter((item) => item.kind === 'order_unpaid_despite_payment');
     const channels = {};
@@ -181,9 +260,10 @@ api.get('/leakage', async (req, res, next) => {
       channels[key].count += 1;
       channels[key].amountPaise += item.amountPaise;
     }
+    const books = workspaceOf(req.store, req.user);
     res.json({
-      provider: BOOKS.gateway,
-      contract: '2%',
+      provider: books.gateway,
+      contract: `${books.contractedFeeBps / 100}%`,
       fees: {
         count: fees.length,
         extraPaise: fees.reduce((sum, item) => sum + item.amountPaise, 0),
@@ -200,7 +280,7 @@ api.get('/leakage', async (req, res, next) => {
 
 api.get('/audit', async (req, res, next) => {
   try {
-    res.json(await Audit.find().sort({ createdAt: -1 }).limit(40).lean());
+    res.json(await Audit.find({ storeId: req.store._id }).sort({ createdAt: -1 }).limit(40).lean());
   } catch (error) {
     next(error);
   }
@@ -212,10 +292,11 @@ api.post('/imports/:source', upload.single('file'), async (req, res, next) => {
       return res.status(400).json({ error: 'Source must be orders, payments or bank.' });
     }
     if (!req.file) return res.status(400).json({ error: 'Choose a CSV file.' });
-    const result = await importCsv(req.params.source, req.file.buffer);
-    await runReconcile();
+    const result = await importCsv(req.params.source, req.file.buffer, req.store._id);
+    await runReconcile(req.store._id);
     await Audit.create({
-      actor: BOOKS.operator,
+      storeId: req.store._id,
+      actor: req.user.name,
       action: 'Imported CSV',
       detail: `${req.params.source}: ${result.inserted} added, ${result.skipped} duplicates, ${result.errors.length} bad rows.`,
     });
@@ -225,18 +306,9 @@ api.post('/imports/:source', upload.single('file'), async (req, res, next) => {
   }
 });
 
-api.get('/samples/:name', (req, res) => {
-  if (!['orders', 'payments', 'bank'].includes(req.params.name)) {
-    return res.status(404).json({ error: 'Unknown sample' });
-  }
-  const file = path.join(rootDir, 'samples', `${req.params.name}.csv`);
-  if (!fs.existsSync(file)) return res.status(404).json({ error: 'Sample missing' });
-  res.download(file);
-});
-
 api.post('/reset', async (req, res, next) => {
   try {
-    await seedBooks();
+    await seedBooks(req.store._id);
     res.json({ ok: true });
   } catch (error) {
     next(error);

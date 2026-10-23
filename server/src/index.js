@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import mongoose from 'mongoose';
+import { parkExistingBooks, repairIndexes } from './indexes.js';
 import { api } from './routes.js';
-import { seedIfEmpty } from './seed.js';
 
 const rootDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '../..');
 dotenv.config({ path: path.join(rootDir, '.env') });
@@ -24,7 +24,7 @@ async function connectDb() {
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json());
 app.use('/api', api);
 
@@ -41,8 +41,8 @@ if (fs.existsSync(clientDist)) {
 
 const port = Number(process.env.PORT) || 4000;
 await connectDb();
-const seeded = await seedIfEmpty();
-if (seeded) console.log('Loaded Nila Studio sample books');
+await repairIndexes();
+await parkExistingBooks();
 app.listen(port, '0.0.0.0', () => {
   console.log(`LedgerLoop listening on ${port}`);
 });

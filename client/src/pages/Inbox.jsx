@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api';
 import { inr } from '../format';
+import { useSession } from '../session';
 import { Card, Page, Pill } from '../ui';
 
 const statusTone = { open: 'clay', investigating: 'brass', waiting: 'brass', resolved: 'moss' };
 
 export default function Inbox() {
+  const { session } = useSession();
   const [rows, setRows] = useState([]);
   const [current, setCurrent] = useState(null);
   const [note, setNote] = useState('');
@@ -77,7 +79,10 @@ export default function Inbox() {
               <label className="text-sm">Owner
                 <select className="mt-1 w-full rounded-xl border border-line bg-white px-3 py-2" value={current.owner} onChange={(e) => save({ owner: e.target.value })}>
                   <option>Unassigned</option>
-                  <option>Adarsh Singh</option>
+                  <option>{session?.user?.name || 'Me'}</option>
+                  {current.owner && current.owner !== 'Unassigned' && current.owner !== session?.user?.name && (
+                    <option>{current.owner}</option>
+                  )}
                 </select>
               </label>
             </div>

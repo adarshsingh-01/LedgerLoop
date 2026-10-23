@@ -1,3 +1,9 @@
+export const STORE_DEFAULTS = {
+  gateway: 'Razorpay',
+  bankName: 'HDFC Bank',
+  contractedFeeBps: 200,
+};
+
 export const BOOKS = {
   name: 'Nila Studio',
   city: 'Kolkata',

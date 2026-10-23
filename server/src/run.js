@@ -1,13 +1,15 @@
-import { BOOKS } from './books.js';
+import { STORE_DEFAULTS } from './books.js';
 import { reconcile } from './match.js';
-import { Audit, BankTxn, Exception, Match, Order, Payment } from './models.js';
+import { Audit, BankTxn, Exception, Match, Order, Payment, Store } from './models.js';
 
-export async function runReconcile() {
+export async function runReconcile(storeId) {
+  const store = await Store.findById(storeId).lean();
+  const scope = { storeId };
   const [orders, payments, bank, kept] = await Promise.all([
-    Order.find().lean(),
-    Payment.find().lean(),
-    BankTxn.find().lean(),
-    Match.find({ status: { $in: ['confirmed', 'rejected'] } }).lean(),
+    Order.find(scope).lean(),
+    Payment.find(scope).lean(),
+    BankTxn.find(scope).lean(),
+    Match.find({ ...scope, status: { $in: ['confirmed', 'rejected'] } }).lean(),
   ]);
 
   const { matches, exceptions } = reconcile({
@@ -15,12 +17,13 @@ export async function runReconcile() {
     payments,
     bank,
     locked: kept.map((item) => item.fingerprint),
-    contractedFeeBps: BOOKS.contractedFeeBps,
+    contractedFeeBps: store?.contractedFeeBps || STORE_DEFAULTS.contractedFeeBps,
   });
 
-  await Match.deleteMany({ status: 'suggested' });
+  await Match.deleteMany({ ...scope, status: 'suggested' });
   const docs = matches.map((item) => ({
     ...item,
+    storeId,
     status: item.autoConfirm ? 'confirmed' : 'suggested',
   }));
   if (docs.length) await Match.insertMany(docs);
@@ -28,6 +31,7 @@ export async function runReconcile() {
   const autos = docs.filter((item) => item.autoConfirm);
   if (autos.length) {
     await Audit.insertMany(autos.map((item) => ({
+      storeId,
       actor: 'LedgerLoop',
       action: 'Auto-confirmed match',
       detail: item.explanation,
@@ -35,23 +39,25 @@ export async function runReconcile() {
   }
 
   const live = new Set(exceptions.map((item) => item.fingerprint));
-  await Exception.deleteMany({ status: 'open', fingerprint: { $nin: [...live] } });
+  await Exception.deleteMany({ ...scope, status: 'open', fingerprint: { $nin: [...live] } });
   for (const item of exceptions) {
-    const existing = await Exception.findOne({ fingerprint: item.fingerprint });
-    if (!existing) await Exception.create(item);
+    const existing = await Exception.findOne({ storeId, fingerprint: item.fingerprint });
+    if (!existing) await Exception.create({ ...item, storeId });
     else if (existing.status === 'open') {
       existing.set(item);
+      existing.storeId = storeId;
       await existing.save();
     }
   }
 }
 
-export async function loadBooks() {
+export async function loadBooks(storeId) {
+  const scope = { storeId };
   const [orders, payments, bank, matches] = await Promise.all([
-    Order.find().lean(),
-    Payment.find().lean(),
-    BankTxn.find().lean(),
-    Match.find().lean(),
+    Order.find(scope).lean(),
+    Payment.find(scope).lean(),
+    BankTxn.find(scope).lean(),
+    Match.find(scope).lean(),
   ]);
   return { orders, payments, bank, matches };
 }

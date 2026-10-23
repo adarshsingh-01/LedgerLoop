@@ -27,17 +27,22 @@ function bank(bankId, rupees, direction, postedAt, narration, reference = '') {
   return { bankId, amountPaise: rs(rupees), direction, postedAt: at(postedAt), narration, reference };
 }
 
-export async function seedBooks() {
+function stamp(storeId, rows) {
+  return rows.map((row) => ({ ...row, storeId }));
+}
+
+export async function seedBooks(storeId) {
+  const scope = { storeId };
   await Promise.all([
-    Order.deleteMany({}),
-    Payment.deleteMany({}),
-    BankTxn.deleteMany({}),
-    Match.deleteMany({}),
-    Exception.deleteMany({}),
-    Audit.deleteMany({}),
+    Order.deleteMany(scope),
+    Payment.deleteMany(scope),
+    BankTxn.deleteMany(scope),
+    Match.deleteMany(scope),
+    Exception.deleteMany(scope),
+    Audit.deleteMany(scope),
   ]);
 
-  await Order.insertMany([
+  await Order.insertMany(stamp(storeId, [
     order('1042', 'Priya Shah', 2499, 'unpaid', 'Website', '2026-10-21', 'Linen co-ord'),
     order('1043', 'Meera Iyer', 1899, 'paid', 'Website', '2026-10-22', 'Handloom saree'),
     order('1044', 'Kabir Das', 3299, 'paid', 'Instagram', '2026-10-22', 'Indigo shirt'),
@@ -57,9 +62,9 @@ export async function seedBooks() {
     order('1082', 'Arjun Malhotra', 6400, 'paid', 'Website', '2026-10-19', 'Linen suit'),
     order('9102', 'Ishaan Gupta', 4000, 'paid', 'Website', '2026-10-11', 'Overshirt'),
     order('9108', 'Sara Khan', 2500, 'paid', 'Instagram', '2026-10-17', 'Dress'),
-  ]);
+  ]));
 
-  await Payment.insertMany([
+  await Payment.insertMany(stamp(storeId, [
     capture('PAY-1042', 'UPI9921841', 2499, '1042', 'Priya Shah', '2026-10-21'),
     capture('PAY-1043', 'UTR2410224419', 1899, '1043', 'Meera Iyer', '2026-10-22'),
     capture('PAY-1044', 'UTR2410227781', 3299, '1044', 'Kabir Das', '2026-10-22'),
@@ -96,11 +101,11 @@ export async function seedBooks() {
     },
     {
       paymentId: 'SET-9108', type: 'settlement', provider: 'Razorpay', reference: 'SET-9108',
-      amountPaise: rs(2425), feePaise: rs(75), orderId: '', customer: '', paidAt: at('2026-10-18'), settlementId: '',
+      amountPaise: rs(2425), feePaise: rs(75), orderId: '', customer: '',       paidAt: at('2026-10-18'), settlementId: '',
     },
-  ]);
+  ]));
 
-  await BankTxn.insertMany([
+  await BankTxn.insertMany(stamp(storeId, [
     bank('B-1042', 2499, 'credit', '2026-10-21', 'UPI/CR/P SHA/OKSBI'),
     bank('B-1043', 1899, 'credit', '2026-10-22', 'UPI/UTR2410224419/MEERA IYER', 'UTR2410224419'),
     bank('B-1044', 3299, 'credit', '2026-10-22', 'UPI/UTR2410227781/KABIR DAS', 'UTR2410227781'),
@@ -118,14 +123,7 @@ export async function seedBooks() {
     bank('B-9108', 2425, 'credit', '2026-10-18', 'RAZORPAY SET-9108', 'SET-9108'),
     bank('B-DUP1', 640, 'credit', '2026-10-19', 'UPI/DUPUTR77/UNKNOWN', 'DUPUTR77'),
     bank('B-DUP2', 640, 'credit', '2026-10-19', 'UPI/DUPUTR77/UNKNOWN', 'DUPUTR77'),
-  ]);
+  ]));
 
-  await runReconcile();
-}
-
-export async function seedIfEmpty() {
-  const count = await Order.countDocuments();
-  if (count > 0) return false;
-  await seedBooks();
-  return true;
+  await runReconcile(storeId);
 }

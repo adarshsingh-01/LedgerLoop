@@ -11,7 +11,7 @@ function dateOf(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
-export async function importCsv(source, buffer) {
+export async function importCsv(source, buffer, storeId) {
   const rows = rowsOf(buffer);
   const errors = [];
   let inserted = 0;
@@ -28,8 +28,9 @@ export async function importCsv(source, buffer) {
           errors.push({ line, message: 'Need order_id, customer, amount and placed_at.' });
           continue;
         }
-        if (await Order.findOne({ orderId: row.order_id })) { skipped += 1; continue; }
+        if (await Order.findOne({ storeId, orderId: row.order_id })) { skipped += 1; continue; }
         await Order.create({
+          storeId,
           orderId: row.order_id,
           customer: row.customer,
           amountPaise,
@@ -46,8 +47,9 @@ export async function importCsv(source, buffer) {
           errors.push({ line, message: 'Need payment_id, type, amount and paid_at.' });
           continue;
         }
-        if (await Payment.findOne({ paymentId: row.payment_id })) { skipped += 1; continue; }
+        if (await Payment.findOne({ storeId, paymentId: row.payment_id })) { skipped += 1; continue; }
         await Payment.create({
+          storeId,
           paymentId: row.payment_id,
           type,
           provider: row.provider || 'Razorpay',
@@ -66,8 +68,9 @@ export async function importCsv(source, buffer) {
           errors.push({ line, message: 'Need bank_id, posted_at, direction and amount.' });
           continue;
         }
-        if (await BankTxn.findOne({ bankId: row.bank_id })) { skipped += 1; continue; }
+        if (await BankTxn.findOne({ storeId, bankId: row.bank_id })) { skipped += 1; continue; }
         await BankTxn.create({
+          storeId,
           bankId: row.bank_id,
           reference: row.reference || '',
           narration: row.narration || '',
